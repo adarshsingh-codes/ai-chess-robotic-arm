@@ -1,53 +1,136 @@
-#include <Servo.h>
+/*
+ * servo_calibration.ino
+ * =====================
+ * Use this sketch FIRST to find the correct neutral angles for each servo.
+ * 
+ * Upload this sketch, open Serial Monitor at 115200 baud, then type commands:
+ *
+ *   SET <channel> <pulse>   — set a specific channel to a raw pulse count
+ *   CENTER <channel>        — set channel to pulse 375 (mid-point)
+ *   OFF <channel>           — turn off a channel (servo goes limp)
+ *   ALL <pulse>             — set all channels to same pulse
+ *   ALLOFF                  — turn off all channels
+ *
+ * Example session:
+ *   SET 0 375     → sets base (ch0) to pulse 375
+ *   SET 0 300     → moves base toward min
+ *   SET 0 450     → moves base toward max
+ *   
+ * Find the pulse value where each servo is at the position you want as neutral.
+ * Write down those values — you'll enter them in config below.
+ *
+ * Pulse count guide (at 50Hz, 4096 counts = 20ms):
+ *   100 = ~0.49ms  (minimum for most servos)
+ *   205 = ~1.00ms  
+ *   375 = ~1.83ms  (current "90°" — probably wrong for your arm)
+ *   410 = ~2.00ms  (center for most standard servos)
+ *   500 = ~2.44ms
+ *   600 = ~2.93ms  (maximum for most servos)
+ *
+ * Typical neutral for most hobby servos: pulse ~375–410
+ */
 
-// 0 base, 1 shoulder, 2 elbow (MG995) | 3 wrist pitch, 4 wrist roll, 5 gripper (MG90)
-const int N = 6;
-const int PINS[N] = {3, 5, 6, 9, 10, 11};
-const int HOME_POS[N] = {90, 120, 40, 90, 90, 40};   // must match HOME_ANGLES + roll + GRIPPER_OPEN
-const int STEP_MS = 12;                               // ms per degree (lower = faster)
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
 
-Servo servo[N];
-int cur[N];
+#define PCA9685_ADDR  0x40
+#define PWM_FREQ      50
+#define OE_PIN        4
+#define USE_OE_PIN    1
 
-void moveTo(const int tgt[]) {
-  int start[N], steps = 0;
-  for (int i = 0; i < N; i++) {
-    start[i] = cur[i];
-    steps = max(steps, abs(tgt[i] - cur[i]));
-  }
-  for (int k = 1; k <= steps; k++) {          // all joints arrive together
-    for (int i = 0; i < N; i++)
-      servo[i].write(start[i] + (long)(tgt[i] - start[i]) * k / steps);
-    delay(STEP_MS);
-  }
-  for (int i = 0; i < N; i++) {
-    cur[i] = tgt[i];
-    servo[i].write(cur[i]);
-  }
-}
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(PCA9685_ADDR);
+
+char buf[64];
+uint8_t bufIdx = 0;
 
 void setup() {
-  Serial.begin(115200);
-  for (int i = 0; i < N; i++) {
-    cur[i] = HOME_POS[i];
-    servo[i].attach(PINS[i]);
-    servo[i].write(cur[i]);
-  }
-  Serial.println("READY");
+    Serial.begin(115200);
+
+#if USE_OE_PIN
+    pinMode(OE_PIN, OUTPUT);
+    digitalWrite(OE_PIN, HIGH);   // outputs OFF during init
+#endif
+
+    pwm.begin();
+    pwm.setOscillatorFrequency(27000000);
+    pwm.setPWMFreq(PWM_FREQ);
+
+    // Start with ALL channels fully OFF — no signal to any servo.
+    // setPWM(ch, 0, 4096) = always LOW = valid "off" state for hobby servos.
+    // NOTE: do NOT use setPin(i, 0, true) — that sets FULL ON (continuous 5V),
+    //       which causes servos to slam to max and draw huge current.
+    for (uint8_t i = 0; i < 16; i++) {
+        pwm.setPWM(i, 0, 4096);   // always LOW = servo off / limp
+    }
+
+#if USE_OE_PIN
+    digitalWrite(OE_PIN, LOW);    // outputs ON
+#endif
+
+    Serial.println("=== SERVO CALIBRATION MODE ===");
+    Serial.println("Commands:");
+    Serial.println("  SET <ch> <pulse>  — e.g. SET 0 375");
+    Serial.println("  CENTER <ch>       — set to pulse 375");
+    Serial.println("  OFF <ch>          — turn off channel");
+    Serial.println("  ALL <pulse>       — all channels same pulse");
+    Serial.println("  ALLOFF            — turn off all channels");
+    Serial.println("Channel map: 0=Base 1=Shoulder 2=Elbow 3=WristRot 4=WristExt 5=Claw");
+    Serial.println("Pulse range: 100 (min) to 600 (max). Neutral is usually 370-410.");
+    Serial.println("READY");
+}
+
+void processCommand(const char* cmd) {
+    char token[16];
+    int ch, pulse;
+
+    if (sscanf(cmd, "SET %d %d", &ch, &pulse) == 2) {
+        ch = constrain(ch, 0, 15);
+        pulse = constrain(pulse, 80, 650);
+        pwm.setPWM(ch, 0, pulse);
+        Serial.print("Ch "); Serial.print(ch);
+        Serial.print(" → pulse "); Serial.println(pulse);
+
+    } else if (sscanf(cmd, "CENTER %d", &ch) == 1) {
+        ch = constrain(ch, 0, 15);
+        pwm.setPWM(ch, 0, 375);
+        Serial.print("Ch "); Serial.print(ch);
+        Serial.println(" → CENTER (375)");
+
+    } else if (sscanf(cmd, "OFF %d", &ch) == 1) {
+        ch = constrain(ch, 0, 15);
+        pwm.setPWM(ch, 0, 4096);  // always LOW = servo limp/off
+        Serial.print("Ch "); Serial.print(ch);
+        Serial.println(" → OFF");
+
+    } else if (sscanf(cmd, "ALL %d", &pulse) == 1) {
+        pulse = constrain(pulse, 80, 650);
+        for (uint8_t i = 0; i < 16; i++) {
+            pwm.setPWM(i, 0, pulse);
+        }
+        Serial.print("ALL → pulse "); Serial.println(pulse);
+
+    } else if (strncmp(cmd, "ALLOFF", 6) == 0) {
+        for (uint8_t i = 0; i < 16; i++) {
+            pwm.setPWM(i, 0, 4096);  // always LOW
+        }
+        Serial.println("ALL → OFF");
+
+    } else {
+        Serial.print("Unknown command: "); Serial.println(cmd);
+    }
 }
 
 void loop() {
-  if (!Serial.available()) return;
-  String line = Serial.readStringUntil('\n');
-  line.trim();
-  int t[N];
-  if (sscanf(line.c_str(), "S %d %d %d %d %d %d",
-             &t[0], &t[1], &t[2], &t[3], &t[4], &t[5]) == N) {
-    for (int i = 0; i < N; i++) t[i] = constrain(t[i], 0, 180);
-    moveTo(t);
-    delay(100);
-    Serial.println("OK");
-  } else {
-    Serial.println("ERR");
-  }
+    while (Serial.available() > 0) {
+        char c = (char)Serial.read();
+        if (c == '\n' || c == '\r') {
+            if (bufIdx > 0) {
+                buf[bufIdx] = '\0';
+                processCommand(buf);
+                bufIdx = 0;
+            }
+        } else if (bufIdx < 63) {
+            buf[bufIdx++] = c;
+        }
+    }
 }
