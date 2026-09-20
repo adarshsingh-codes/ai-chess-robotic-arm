@@ -1,136 +1,167 @@
 /*
- * servo_calibration.ino
- * =====================
- * Use this sketch FIRST to find the correct neutral angles for each servo.
- * 
- * Upload this sketch, open Serial Monitor at 115200 baud, then type commands:
+ * chess_arm_arduino.ino  —  PCA9685 version, hybrid continuous-rotation + positional
  *
- *   SET <channel> <pulse>   — set a specific channel to a raw pulse count
- *   CENTER <channel>        — set channel to pulse 375 (mid-point)
- *   OFF <channel>           — turn off a channel (servo goes limp)
- *   ALL <pulse>             — set all channels to same pulse
- *   ALLOFF                  — turn off all channels
+ * Base, Shoulder, Elbow (ch 0,1,2)   = continuous-rotation servos, driven by
+ *                                      timed relative moves (no position feedback).
+ * Wrist Pitch, Wrist Roll, Gripper   = normal positional servos, driven by
+ *                                      direct pulse mapping (ch 4, 3, 5).
  *
- * Example session:
- *   SET 0 375     → sets base (ch0) to pulse 375
- *   SET 0 300     → moves base toward min
- *   SET 0 450     → moves base toward max
- *   
- * Find the pulse value where each servo is at the position you want as neutral.
- * Write down those values — you'll enter them in config below.
+ * Laptop sends:  "S <base> <shoulder> <elbow> <pitch> <roll> <grip>\n"  (0-180, absolute)
+ * Replies "OK" when the move finishes, "ERR" on a bad line. Also accepts "LIMP".
  *
- * Pulse count guide (at 50Hz, 4096 counts = 20ms):
- *   100 = ~0.49ms  (minimum for most servos)
- *   205 = ~1.00ms  
- *   375 = ~1.83ms  (current "90°" — probably wrong for your arm)
- *   410 = ~2.00ms  (center for most standard servos)
- *   500 = ~2.44ms
- *   600 = ~2.93ms  (maximum for most servos)
- *
- * Typical neutral for most hobby servos: pulse ~375–410
+ * IMPORTANT: base/shoulder/elbow have no position feedback. On boot, the
+ * firmware ASSUMES the arm is physically at HOME (90, 120, 40) already —
+ * position it there by hand before powering on / before running main.py.
  */
 
 #include <Wire.h>
+#include <math.h>
 #include <Adafruit_PWMServoDriver.h>
 
-#define PCA9685_ADDR  0x40
-#define PWM_FREQ      50
-#define OE_PIN        4
-#define USE_OE_PIN    1
+#define PCA9685_ADDR 0x40
+#define PWM_FREQ     50
+#define OE_PIN       4
+#define USE_OE_PIN   1
 
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(PCA9685_ADDR);
+
+const int N = 6;
+
+// ---- Continuous-rotation joints: base=0, shoulder=1, elbow=2 (physical ch 0,1,2) ----
+#define STOP_PULSE   307
+#define DEFLECTION   78     // pulse offset from STOP_PULSE for full commanded speed
+#define SPEED_DPS    180.0  // calibrated deg/sec at this deflection
+#define POS_FACTOR   1.25   // CCW (positive delta) duration correction
+#define NEG_FACTOR   1.0    // CW (negative delta) duration correction
+
+float curAngle[3];   // software-tracked angle — only as accurate as the last real position
+
+// ---- Positional joints: wrist pitch=3, wrist roll=4, gripper=5 ----
+// Physical channel for each (pitch->ch4, roll->ch3, gripper->ch5):
+const uint8_t POS_CH[3]  = {4, 3, 5};
+int PULSE_MIN[3] = {150, 150, 150};   // wristPitch, wristRoll, gripper — from your empirical claw calibration
+int PULSE_MAX[3] = {300, 300, 300};
+
+int ANG_MIN[N] = {0,   0,   0,   0,   0,   0};
+int ANG_MAX[N] = {180, 180, 180, 180, 180, 180};
+
+const int HOME_POS[N] = {90, 120, 40, 90, 90, 40};   // base, shoulder, elbow, pitch, roll, grip
 
 char buf[64];
 uint8_t bufIdx = 0;
 
-void setup() {
-    Serial.begin(115200);
-
-#if USE_OE_PIN
-    pinMode(OE_PIN, OUTPUT);
-    digitalWrite(OE_PIN, HIGH);   // outputs OFF during init
-#endif
-
-    pwm.begin();
-    pwm.setOscillatorFrequency(27000000);
-    pwm.setPWMFreq(PWM_FREQ);
-
-    // Start with ALL channels fully OFF — no signal to any servo.
-    // setPWM(ch, 0, 4096) = always LOW = valid "off" state for hobby servos.
-    // NOTE: do NOT use setPin(i, 0, true) — that sets FULL ON (continuous 5V),
-    //       which causes servos to slam to max and draw huge current.
-    for (uint8_t i = 0; i < 16; i++) {
-        pwm.setPWM(i, 0, 4096);   // always LOW = servo off / limp
-    }
-
-#if USE_OE_PIN
-    digitalWrite(OE_PIN, LOW);    // outputs ON
-#endif
-
-    Serial.println("=== SERVO CALIBRATION MODE ===");
-    Serial.println("Commands:");
-    Serial.println("  SET <ch> <pulse>  — e.g. SET 0 375");
-    Serial.println("  CENTER <ch>       — set to pulse 375");
-    Serial.println("  OFF <ch>          — turn off channel");
-    Serial.println("  ALL <pulse>       — all channels same pulse");
-    Serial.println("  ALLOFF            — turn off all channels");
-    Serial.println("Channel map: 0=Base 1=Shoulder 2=Elbow 3=WristRot 4=WristExt 5=Claw");
-    Serial.println("Pulse range: 100 (min) to 600 (max). Neutral is usually 370-410.");
-    Serial.println("READY");
+uint16_t contPulse(int dir) {   // dir: +1 CCW, -1 CW, 0 stop
+  if (dir == 0) return STOP_PULSE;
+  return dir > 0 ? (STOP_PULSE + DEFLECTION) : (STOP_PULSE - DEFLECTION);
 }
 
-void processCommand(const char* cmd) {
-    char token[16];
-    int ch, pulse;
+void writePosJoint(int i, int deg) {   // i = 3, 4, 5
+  deg = constrain(deg, ANG_MIN[i], ANG_MAX[i]);
+  int k = i - 3;
+  pwm.setPWM(POS_CH[k], 0, map(deg, 0, 180, PULSE_MIN[k], PULSE_MAX[k]));
+}
 
-    if (sscanf(cmd, "SET %d %d", &ch, &pulse) == 2) {
-        ch = constrain(ch, 0, 15);
-        pulse = constrain(pulse, 80, 650);
-        pwm.setPWM(ch, 0, pulse);
-        Serial.print("Ch "); Serial.print(ch);
-        Serial.print(" → pulse "); Serial.println(pulse);
+void allOff() {
+  for (uint8_t i = 0; i < 16; i++) pwm.setPWM(i, 0, 4096);
+}
 
-    } else if (sscanf(cmd, "CENTER %d", &ch) == 1) {
-        ch = constrain(ch, 0, 15);
-        pwm.setPWM(ch, 0, 375);
-        Serial.print("Ch "); Serial.print(ch);
-        Serial.println(" → CENTER (375)");
+void moveTo(const int tgt[]) {
+  unsigned long dur[3];
+  bool done[3];
+  unsigned long start = millis();
 
-    } else if (sscanf(cmd, "OFF %d", &ch) == 1) {
-        ch = constrain(ch, 0, 15);
-        pwm.setPWM(ch, 0, 4096);  // always LOW = servo limp/off
-        Serial.print("Ch "); Serial.print(ch);
-        Serial.println(" → OFF");
-
-    } else if (sscanf(cmd, "ALL %d", &pulse) == 1) {
-        pulse = constrain(pulse, 80, 650);
-        for (uint8_t i = 0; i < 16; i++) {
-            pwm.setPWM(i, 0, pulse);
-        }
-        Serial.print("ALL → pulse "); Serial.println(pulse);
-
-    } else if (strncmp(cmd, "ALLOFF", 6) == 0) {
-        for (uint8_t i = 0; i < 16; i++) {
-            pwm.setPWM(i, 0, 4096);  // always LOW
-        }
-        Serial.println("ALL → OFF");
-
-    } else {
-        Serial.print("Unknown command: "); Serial.println(cmd);
+  for (int i = 0; i < 3; i++) {
+    float delta = (float)tgt[i] - curAngle[i];
+    if (fabs(delta) < 0.5) {
+      dur[i] = 0;
+      done[i] = true;
+      pwm.setPWM(i, 0, 4096);
+      continue;
     }
+    int dir = (delta > 0) ? 1 : -1;
+    float factor = (delta > 0) ? POS_FACTOR : NEG_FACTOR;
+    dur[i] = (unsigned long)((fabs(delta) / SPEED_DPS) * 1000.0 * factor);
+    done[i] = false;
+    pwm.setPWM(i, 0, contPulse(dir));
+  }
+
+  // Wrist pitch/roll + gripper: positional, set immediately, they ramp on their own.
+  for (int i = 3; i < N; i++) writePosJoint(i, tgt[i]);
+
+  // Let each continuous joint run for its own duration, cutting its signal
+  // the instant IT is done (not waiting for the slowest one).
+  while (!(done[0] && done[1] && done[2])) {
+    unsigned long elapsed = millis() - start;
+    for (int i = 0; i < 3; i++) {
+      if (!done[i] && elapsed >= dur[i]) {
+        pwm.setPWM(i, 0, 4096);   // cut signal -> stops
+        done[i] = true;
+      }
+    }
+  }
+  for (int i = 0; i < 3; i++) curAngle[i] = tgt[i];
+
+  delay(150);   // let the 3 positional servos visually settle
+}
+
+void setup() {
+  Serial.begin(115200);
+
+#if USE_OE_PIN
+  pinMode(OE_PIN, OUTPUT);
+  digitalWrite(OE_PIN, HIGH);
+#endif
+
+  pwm.begin();
+  pwm.setOscillatorFrequency(27000000);
+  pwm.setPWMFreq(PWM_FREQ);
+  allOff();
+
+#if USE_OE_PIN
+  digitalWrite(OE_PIN, LOW);
+#endif
+
+  // Continuous-rotation joints: trust the arm is physically at HOME already.
+  curAngle[0] = HOME_POS[0];
+  curAngle[1] = HOME_POS[1];
+  curAngle[2] = HOME_POS[2];
+  for (int i = 0; i < 3; i++) pwm.setPWM(i, 0, 4096);   // limp, matches your tested behavior
+
+  // Positional joints: actually home for real.
+  for (int i = 3; i < N; i++) {
+    writePosJoint(i, HOME_POS[i]);
+    delay(300);
+  }
+
+  Serial.println("READY - confirm base/shoulder/elbow are physically at HOME before sending moves");
+}
+
+void handle(const char* cmd) {
+  int t[N];
+  if (sscanf(cmd, "S %d %d %d %d %d %d",
+             &t[0], &t[1], &t[2], &t[3], &t[4], &t[5]) == N) {
+    for (int i = 0; i < N; i++) t[i] = constrain(t[i], ANG_MIN[i], ANG_MAX[i]);
+    moveTo(t);
+    Serial.println("OK");
+  } else if (strncmp(cmd, "LIMP", 4) == 0) {
+    allOff();
+    Serial.println("OK");
+  } else {
+    Serial.println("ERR");
+  }
 }
 
 void loop() {
-    while (Serial.available() > 0) {
-        char c = (char)Serial.read();
-        if (c == '\n' || c == '\r') {
-            if (bufIdx > 0) {
-                buf[bufIdx] = '\0';
-                processCommand(buf);
-                bufIdx = 0;
-            }
-        } else if (bufIdx < 63) {
-            buf[bufIdx++] = c;
-        }
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (bufIdx > 0) {
+        buf[bufIdx] = '\0';
+        bufIdx = 0;
+        handle(buf);
+      }
+    } else if (bufIdx < 63) {
+      buf[bufIdx++] = c;
     }
+  }
 }
