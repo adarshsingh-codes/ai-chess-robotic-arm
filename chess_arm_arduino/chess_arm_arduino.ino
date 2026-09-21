@@ -1,7 +1,7 @@
 /*
  * chess_arm_arduino.ino  —  PCA9685 version, hybrid continuous-rotation + positional
  *
- * Base, Shoulder, Elbow (ch 0,1,2)   = continuous-rotation servos, driven by
+ * Base, Shoulder, Elbow (ch 0,1,2)   = continuous-rotation servos (new sturdier units), driven by
  *                                      timed relative moves (no position feedback).
  * Wrist Pitch, Gripper               = normal positional servos, driven by
  *                                      direct pulse mapping (ch 4, 5).
@@ -15,7 +15,7 @@
  * Replies "OK" when the move finishes, "ERR" on a bad line. Also accepts "LIMP".
  *
  * IMPORTANT: base/shoulder/elbow have no position feedback. On boot, the
- * firmware ASSUMES the arm is physically at HOME (90, 120, 40) already —
+ * firmware ASSUMES the arm is physically at HOME (90, 90, 90) already —
  * position it there by hand before powering on / before running main.py.
  */
 
@@ -33,11 +33,13 @@ Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(PCA9685_ADDR);
 const int N = 6;
 
 // ---- Continuous-rotation joints: base=0, shoulder=1, elbow=2 (physical ch 0,1,2) ----
-#define STOP_PULSE   307
-#define DEFLECTION   78     // pulse offset from STOP_PULSE for full commanded speed
-#define SPEED_DPS    180.0  // calibrated deg/sec at this deflection
-#define POS_FACTOR   1.25   // CCW (positive delta) duration correction
-#define NEG_FACTOR   1.0    // CW (negative delta) duration correction
+// Per-joint calibration (base, shoulder, elbow) — new motors, recalibrate each one.
+int   STOP_PULSE[3] = {307, 307, 307};      // pulse where that motor stands perfectly still
+int   DEFLECTION[3] = {78, 78, 78};         // offset from STOP for moving speed
+float SPEED_DPS[3]  = {180.0, 180.0, 180.0};// deg/sec at that deflection
+float POS_FACTOR[3] = {1.25, 1.25, 1.25};   // correction when angle INCREASES
+float NEG_FACTOR[3] = {1.0, 1.0, 1.5};      // correction when angle DECREASES (elbow boosted: lifts against gravity)
+int   START_MS[3]   = {40, 40, 40};         // extra ms per move: motor spin-up time (fixes small moves doing nothing)
 
 float curAngle[3];   // software-tracked angle — only as accurate as the last real position
 
@@ -50,14 +52,14 @@ int PULSE_MAX[3] = {300, 300, 300};
 int ANG_MIN[N] = {0,   0,   0,   0,   0,   0};
 int ANG_MAX[N] = {180, 180, 180, 180, 180, 180};
 
-const int HOME_POS[N] = {90, 120, 40, 90, 90, 40};   // base, shoulder, elbow, pitch, roll, grip
+const int HOME_POS[N] = {90, 90, 90, 90, 90, 40};   // base, shoulder, elbow, pitch, roll, grip
 
 char buf[64];
 uint8_t bufIdx = 0;
 
-uint16_t contPulse(int dir) {   // dir: +1 CCW, -1 CW, 0 stop
-  if (dir == 0) return STOP_PULSE;
-  return dir > 0 ? (STOP_PULSE + DEFLECTION) : (STOP_PULSE - DEFLECTION);
+uint16_t contPulse(int j, int dir) {   // j = joint 0..2, dir: +1 / -1 / 0
+  if (dir == 0) return STOP_PULSE[j];
+  return dir > 0 ? (STOP_PULSE[j] + DEFLECTION[j]) : (STOP_PULSE[j] - DEFLECTION[j]);
 }
 
 void writePosJoint(int i, int deg) {   // i = 3, 4, 5   (i == 4 / wrist roll is never called)
@@ -84,10 +86,10 @@ void moveTo(const int tgt[]) {
       continue;
     }
     int dir = (delta > 0) ? 1 : -1;
-    float factor = (delta > 0) ? POS_FACTOR : NEG_FACTOR;
-    dur[i] = (unsigned long)((fabs(delta) / SPEED_DPS) * 1000.0 * factor);
+    float factor = (delta > 0) ? POS_FACTOR[i] : NEG_FACTOR[i];
+    dur[i] = (unsigned long)((fabs(delta) / SPEED_DPS[i]) * 1000.0 * factor) + START_MS[i];
     done[i] = false;
-    pwm.setPWM(i, 0, contPulse(dir));
+    pwm.setPWM(i, 0, contPulse(i, dir));
   }
 
   // Wrist pitch + gripper: positional, set immediately, they ramp on their own.

@@ -11,20 +11,20 @@ SERIAL_PORT = "COM4"       # <-- SET THIS to whatever Device Manager shows on TH
 BAUD = 115200
 
 # ===== Chess engine =====
-STOCKFISH_PATH = r"C:\Users\rs615\Downloads\stockfish-windows-x86-64-universal\stockfish\stockfish-windows-x86-64-universal.exe"   # on Windows: full path to stockfish.exe
+STOCKFISH_PATH =r"C:\Users\vpgjp\Downloads\stockfish-windows-x86-64-universal\stockfish\stockfish-windows-x86-64-universal.exe"   # on Windows: full path to stockfish.exe
 ENGINE_TIME = 0.5              # seconds per AI move
 SKILL_LEVEL = 5                # 0 (weak) .. 20 (max)
 HUMAN_COLOR = "white"          # arm plays the other side and sits behind its back rank
 
 # ===== Arm geometry (mm) — measured on the actual arm =====
-BASE_HEIGHT = 140.0  # board surface -> shoulder axis
-L1 = 120.0           # shoulder axis -> elbow axis
-L2 = 90.0            # elbow axis -> wrist axis
-L3 = 138.0           # wrist axis -> gripper fingertips
+BASE_HEIGHT = 95.0  # board surface -> shoulder axis
+L1 = 125.0           # shoulder axis -> elbow axis
+L2 = 93.0            # elbow axis -> wrist axis
+L3 = 136.0           # wrist axis -> gripper fingertips
 
 # ===== Board placement (mm) =====
 SQ = 47.0            # square size
-BOARD_GAP = 50.0     # base rotation axis -> nearest board edge
+BOARD_GAP = 60.0     # base rotation axis -> nearest board edge
 BOARD_Y_SHIFT = 1.0  # base sits ~1mm left of board center — effectively centered
 
 # ===== Heights (mm above board surface) =====
@@ -43,7 +43,7 @@ SERVO_DIR    = [1, 1, 1, 1]      # flip to -1 if a joint moves the wrong way
 ROLL_NEUTRAL = 90
 GRIPPER_OPEN = 40
 GRIPPER_CLOSED = 95
-HOME_ANGLES = [90, 120, 40, 90]  # base, shoulder, elbow, wrist — parked, not blocking camera
+HOME_ANGLES = [90, 90, 90, 90]  # base, shoulder, elbow, wrist — parked, not blocking camera
 
 # ===== Graveyard for captured pieces (x, y mm), right side of the board =====
 GRAVEYARD = [(BOARD_GAP + (i % 8 + 0.5) * SQ, -(4 * SQ + 30) - (i // 8) * 30) for i in range(16)]
