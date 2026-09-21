@@ -11,7 +11,7 @@ SERIAL_PORT = "COM4"       # <-- SET THIS to whatever Device Manager shows on TH
 BAUD = 115200
 
 # ===== Chess engine =====
-STOCKFISH_PATH = "stockfish"   # on Windows: full path to stockfish.exe
+STOCKFISH_PATH = r"C:\Users\rs615\Downloads\stockfish-windows-x86-64-universal\stockfish\stockfish-windows-x86-64-universal.exe"   # on Windows: full path to stockfish.exe
 ENGINE_TIME = 0.5              # seconds per AI move
 SKILL_LEVEL = 5                # 0 (weak) .. 20 (max)
 HUMAN_COLOR = "white"          # arm plays the other side and sits behind its back rank
